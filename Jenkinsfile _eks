@@ -1,0 +1,46 @@
+pipeline {
+    agent any
+
+    environment {
+        REGISTRY = "nexus.example.com"
+        IMAGE_NAME = "myapp"
+        NEXUS_REPO = "docker-hosted"
+        CREDENTIALS_ID = "nexus-docker-creds"
+    }
+
+    stages {
+        stage('Push & Get Versions') {
+            steps {
+                script {
+                    // Build & Push image
+                    def version = "1.0.${env.BUILD_NUMBER}"
+                    def imageFull = "${REGISTRY}/${NEXUS_REPO}/${IMAGE_NAME}:${version}"
+                    sh "docker build -t ${imageFull} ."
+                    withCredentials([usernamePassword(credentialsId: env.CREDENTIALS_ID, usernameVariable: 'NEXUS_USER', passwordVariable: 'NEXUS_PASS')]) {
+                        sh "echo $NEXUS_PASS | docker login ${REGISTRY} -u $NEXUS_USER --password-stdin"
+                        sh "docker push ${imageFull}"
+                    }
+
+                    // Fetch recent tags using Nexus API or docker
+                    echo "Fetching latest image tags for rollback:"
+                    withCredentials([usernamePassword(credentialsId: env.CREDENTIALS_ID, usernameVariable: 'NEXUS_USER', passwordVariable: 'NEXUS_PASS')]) {
+                        def tagsJson = sh(
+                            script: """curl -s -u $NEXUS_USER:$NEXUS_PASS "https://${REGISTRY}/v2/${NEXUS_REPO}/${IMAGE_NAME}/tags/list" """,
+                            returnStdout: true
+                        ).trim()
+
+                        def tags = readJSON text: tagsJson
+                        def sortedTags = tags.tags.sort(false) // Customize if tags aren't naturally sortable
+                        def recentTags = sortedTags.reverse().take(5)
+
+                        echo "Recent 5 tags: ${recentTags.join(', ')}"
+
+                        // Optionally save to a file or stash
+                        writeFile file: 'rollback_tags.txt', text: recentTags.join('\n')
+                        archiveArtifacts artifacts: 'rollback_tags.txt', fingerprint: true
+                    }
+                }
+            }
+        }
+    }
+}
